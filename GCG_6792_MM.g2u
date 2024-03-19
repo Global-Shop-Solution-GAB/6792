@@ -1,0 +1,198 @@
+﻿Program.Sub.ScreenSU.Start
+Gui.Form_MM..Create(BaseForm)
+Gui.Form_MM..Caption("GCG 6792 - AlphaCAM Flex Schedule Maintenance Menu")
+Gui.Form_MM..Size(535,100)
+Gui.Form_MM..MinX(0)
+Gui.Form_MM..MinY(0)
+Gui.Form_MM..Position(0,0)
+Gui.Form_MM..AlwaysOnTop(False)
+Gui.Form_MM..FontName("Tahoma")
+Gui.Form_MM..FontSize(8.25)
+Gui.Form_MM..ControlBox(True)
+Gui.Form_MM..MaxButton(True)
+Gui.Form_MM..MinButton(True)
+Gui.Form_MM..MousePointer(0)
+Gui.Form_MM..Moveable(True)
+Gui.Form_MM..Sizeable(True)
+Gui.Form_MM..ShowInTaskBar(True)
+Gui.Form_MM..TitleBar(True)
+Gui.Form_MM..AccentColor(1)
+Gui.Form_MM..Event(UnLoad,Form_MM_UnLoad)
+Gui.Form_MM.cmd_ExportPath.Create(Button)
+Gui.Form_MM.cmd_ExportPath.Enabled(True)
+Gui.Form_MM.cmd_ExportPath.Visible(True)
+Gui.Form_MM.cmd_ExportPath.Zorder(0)
+Gui.Form_MM.cmd_ExportPath.Size(29,23)
+Gui.Form_MM.cmd_ExportPath.Position(431,32)
+Gui.Form_MM.cmd_ExportPath.Caption("")
+Gui.Form_MM.cmd_ExportPath.FontName("Tahoma")
+Gui.Form_MM.cmd_ExportPath.FontSize(8.25)
+Gui.Form_MM.cmd_ExportPath.Event(Click,cmd_ExportFile_Click)
+Gui.Form_MM.cmd_ExportPath.SvgPicture("icon_browser_color")
+Gui.Form_MM.txt_ExportPath.Create(TextBox,"",True,396,20,0,18,34,True,0,"Tahoma",8.25,,1)
+Gui.Form_MM.txt_ExportPath.Locked(True)
+Gui.Form_MM.lbl4.Create(Label,"Export File Path",True,88,13,0,18,15,True,0,"Tahoma",8.5,,0,0)
+Gui.Form_MM.lbl4.BorderStyle(0)
+Gui.Form_MM.lbl4.FontStyle(True,False,False,False,False)
+Gui.Form_MM.cmd_SaveExport.Create(Button)
+Gui.Form_MM.cmd_SaveExport.Enabled(True)
+Gui.Form_MM.cmd_SaveExport.Visible(True)
+Gui.Form_MM.cmd_SaveExport.Zorder(0)
+Gui.Form_MM.cmd_SaveExport.Size(48,23)
+Gui.Form_MM.cmd_SaveExport.Position(471,32)
+Gui.Form_MM.cmd_SaveExport.Caption("Save")
+Gui.Form_MM.cmd_SaveExport.FontName("Tahoma")
+Gui.Form_MM.cmd_SaveExport.FontSize(8.25)
+Gui.Form_MM.cmd_SaveExport.Event(Click,cmd_SaveExport_Click)
+Program.Sub.ScreenSU.End
+
+Program.Sub.Preflight.Start
+V.Global.sError.Declare(String)
+V.Global.sExportDir.Declare(String)
+
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Author: Arturo Almaguer
+'Date: 6/10/22
+'Customer: MOBIFORM LTD (J.J. JOINERY UK LTD), quote number 13544
+'This program is a maintenance menu for ARC 6792
+'This script is launched off a new custom menu item under Shop Floor Connect > Transactions > CAM Flex Schedule Maintenance. 
+
+F.Intrinsic.Control.Try
+
+	Function.Intrinsic.UI.UsePixels ' Allows you to use Pixels instead of Twips throughout
+	
+	F.Intrinsic.Control.CallSub(CheckTable)
+	F.Intrinsic.Control.CallSub(LoadData)
+	
+	GUI.Form_MM..Show
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.Main.End
+
+Program.Sub.cmd_ExportFile_Click.Start
+F.Intrinsic.Control.Try
+
+	F.Intrinsic.UI.FolderBrowser("Select the path to export AlphaCAM CSV files to", "", V.Global.sExportDir)
+	
+	F.Intrinsic.Control.If(V.Global.sExportDir.IsNotCancel)
+		
+		GUI.Form_MM.txt_ExportPath.Text(V.Global.sExportDir)
+
+	F.Intrinsic.Control.Else
+		
+		'Displaying error message
+		F.Intrinsic.UI.Msgbox("A file must be selected to process.", "ERROR")
+		GUI.Form_MM.txt_ExportPath.Text("")
+		
+	F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.cmd_ExportFile_Click.End
+
+Program.Sub.CheckTable.Start
+F.Intrinsic.Control.Try
+
+	V.Local.bExists.Declare(Boolean)
+	
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	F.ODBC.Connection!Con.TableExists("GCG_6792_MM", V.Local.bExists)
+		F.Intrinsic.Control.If(V.Local.bExists, =, False)
+			F.ODBC.Connection!Con.Execute("CREATE TABLE GCG_6792_MM (EXPORTDIR CHAR(200));")
+		F.Intrinsic.Control.EndIf
+	F.ODBC.Connection!Con.Close
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.CheckTable.End
+
+Program.Sub.Form_MM_UnLoad.Start
+'Making form invisible
+GUI.Form_MM..Visible(False)
+
+'Closes the connection if it is open
+f.Intrinsic.Control.If(v.ODBC.con.exists,=,"1") 	
+    f.ODBC.Connection!Con.Close
+f.Intrinsic.Control.EndIf
+
+'Ending program
+F.Intrinsic.Control.End
+Program.Sub.Form_MM_UnLoad.End
+
+Program.Sub.LoadData.Start
+'This part is loading data from database to datable
+
+F.Intrinsic.Control.Try
+
+	'To check if datatables already exists
+	F.Intrinsic.Control.If(V.DataTable.dtExportPath.Exists)
+		F.Data.DataTable.Close("dtExportPath")
+	F.Intrinsic.Control.EndIf
+	
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	F.Data.DataTable.CreateFromSQL("dtExportPath", "Con", "select RTRIM(EXPORTDIR) EXPORTDIR from GCG_6792_MM", True)
+	F.ODBC.Connection!Con.Close
+	
+	F.Intrinsic.Control.If(V.DataTable.dtExportPath.RowCount, >, 0)
+		GUI.Form_MM.txt_ExportPath.Text(V.DataTable.dtExportPath(0).EXPORTDIR!FieldVal)
+	F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.LoadData.End
+
+Program.Sub.cmd_SaveExport_Click.Start
+F.Intrinsic.Control.Try
+
+	V.Local.sSQL.Declare(String)
+	
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	F.ODBC.Connection!Con.ExecuteAndReturn("select * from GCG_6792_MM;", V.Local.sSQL)
+	
+	F.Intrinsic.Control.If(V.Ambient.ExecuteAndReturnEOF, =, True)
+		F.Intrinsic.String.Build("insert into GCG_6792_MM(EXPORTDIR) values('{0}');", V.Global.sExportDir, V.Local.sSQL)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.String.Build("update GCG_6792_MM set EXPORTDIR = '{0}';", V.Global.sExportDir, V.Local.sSQL)
+	F.Intrinsic.Control.EndIf
+	
+	F.ODBC.Connection!Con.Execute(V.Local.sSQL)
+	F.ODBC.Connection!Con.Close
+	F.Intrinsic.UI.Msgbox("Export path has been saved.", "Success")
+
+F.Intrinsic.Control.Catch
+
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+
+Program.Sub.cmd_SaveExport_Click.End
+
+Program.Sub.CatchError.Start
+'To display the error
+F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}", V.Ambient.ScriptPath, V.Ambient.Newline, V.Ambient.SubroutineCalledFrom, V.Ambient.ErrorNumber, V.Ambient.ErrorDescription, V.Ambient.GABVersion, V.Global.sError) 
+F.Intrinsic.UI.Msgbox(V.Global.sError)
+F.Intrinsic.Control.CallSub("Form_MM_UnLoad")
+Program.Sub.CatchError.End
+
+Program.Sub.Comments.Start
+${$5$}$3.0.0.0$}$1
+${$6$}$apadilla$}$20220620122051047$}$Lag9STqBJOmNXSbd5+msRcBWPGz0aFqSzPePUG9qWbzGA4YWpf8DWH5HEiIRq+B8tLTangr05QXMqfIrmhPpHA==
+Program.Sub.Comments.End
