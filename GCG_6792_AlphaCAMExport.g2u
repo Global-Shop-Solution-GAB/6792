@@ -1,0 +1,557 @@
+﻿Program.Sub.Preflight.Start
+V.Global.sError.Declare(String)
+V.Global.sExportPath.Declare(String)
+
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Author: Arturo Almaguer
+'Date: 6/10/22
+'Customer: MOBIFORM LTD (J.J. JOINERY UK LTD), quote number 13544
+'This program creates a CSV file from a FS's processed Work Orders
+'This script is launched off a new custom menu item under Shop Floor Connect > Transactions > CAM Flex Schedule Export. 
+
+Function.Intrinsic.UI.UsePixels ' Allows you to use Pixels instead of Twips throughout
+
+F.Intrinsic.Control.Try
+
+	V.Local.sSelectedFS.Declare(String)
+	V.Local.sTitles.Declare(String)
+	V.Local.iWidths.Declare(Long)
+	v.Local.sSQL.Declare(String)
+	V.Local.iCounter.Declare(Long)
+	v.Local.sEH1.Declare(String)
+	v.Local.sEH2.Declare(String)
+	v.Local.sEH3.Declare(String)
+	V.Local.sFS.Declare(String)
+	V.Local.sMultiPartWO.Declare(String)
+	V.Local.iCounter2.Declare(Long)
+	
+	'First step should be to have an export path set up
+	F.Intrinsic.Control.CallSub("GetExportPath")
+	
+	'Setting up parameters for flexible schedule browser
+	F.Intrinsic.String.Split("Flexible Schedule*!*Suffix","*!*",V.Local.sTitles)
+	F.Intrinsic.String.Split("100*!*100","*!*",V.Local.iWidths)
+	
+	'Creating browser with all flex schedules. A flex schedule allows the user to group labor from multiple jobs for a common work center or op code.
+	'From now on, Flex Schedule = FS.
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	F.Intrinsic.UI.Browser("Select the flexible schedule","Con","select distinct RTRIM(SCHEDULE) SCHEDULE, RTRIM(SCHEDULE_SUFFIX) SCHEDULE_SUFFIX from V_JOB_CT_FLX_SCHD where LABOR_WC = 'NEST' order by SCHEDULE desc", V.Local.sTitles, V.Local.iWidths, 6000, 8000, V.Local.sSelectedFS)
+
+	'Continue with process if a FS was chosen
+	F.Intrinsic.Control.If(V.Local.sSelectedFS.IsNotCancel)
+		
+		'Displaying loading screen 
+		F.Intrinsic.UI.InvokeWaitDialog("Processing WOs within selected Flex Schedule...", "GCG 6792 - AlphaCAM Flex Schedule Export")
+		
+		'Loading data related to WOs within FS
+		f.Intrinsic.String.Split(V.Local.sSelectedFS, "*!*", V.Local.sSelectedFS)
+		
+		'Select disntict since there might be multiple records for the same JOB and SUFFIX since a new one gets created for each mat seq in V_JOB_CT_FLX_SCHD
+		F.Intrinsic.String.Build("select distinct A.JOB, A.SUFFIX, B.SALES_ORDER, B.PART, B.QTY_ORDER, isnull(C.USER_1, D.USER_1) as USER_1, isnull(C.USER_2, D.USER_2) as USER_2, isnull(C.USER_3, D.USER_3) as USER_3, isnull(C.USER_4, D.USER_4) as USER_4, isnull(C.USER_5, D.USER_5) as USER_5 from V_JOB_CT_FLX_SCHD A LEFT JOIN V_JOB_HEADER B ON A.JOB = B.JOB and A.SUFFIX = B.SUFFIX LEFT JOIN V_ORDER_HEADER C ON B.SALES_ORDER = C.ORDER_NO LEFT JOIN V_WO_USER_FLDS D ON B.JOB = D.JOB and B.SUFFIX = D.SUFFIX where A.SCHEDULE = '{0}' and A.SCHEDULE_SUFFIX = '{1}';", V.Local.sSelectedFS(0), V.Local.sSelectedFS(1), V.Local.sSQL)
+		f.Data.DataTable.CreateFromSQL("dtWOs", "Con", V.Local.sSQL, True)
+		
+		'Getting all data from their custom table
+		f.Data.DataTable.CreateFromSQL("dtIDBAC_GSS", "Con", "select * from IDBAC_GSS;", True)
+		
+		'Looping through all WOs within FS
+		F.Intrinsic.Control.For(V.Local.iCounter, 0, V.DataTable.dtWOs.RowCount--, 1) 
+			
+			'Validating if WO is a multi part one or not.
+			F.Intrinsic.String.Build("select RTRIM(PART) PART from V_JOB_MULT_PARTS where JOB = '{0}' and SUFFIX = '{1}';", V.DataTable.dtWOs(V.Local.iCounter).JOB!FieldValTrim, V.DataTable.dtWOs(V.Local.iCounter).SUFFIX!FieldValTrim, V.Local.sSQL)
+			F.ODBC.Connection!Con.ExecuteAndReturn(V.Local.sSQL, V.Local.sMultiPartWO)
+		
+			F.Intrinsic.Control.If(V.Ambient.ExecuteAndReturnEOF, =, False)
+
+				'Getting associated BOM for all parts since WO is a multipart one
+				f.Intrinsic.String.Split(V.Local.sMultiPartWO, "#$#", V.Local.sMultiPartWO)
+				F.Intrinsic.Control.For(V.Local.iCounter2, 0, V.Local.sMultiPartWO.UBound, 1)
+					F.Intrinsic.Control.If(V.Local.iCounter2, =, 0)
+						F.Intrinsic.Control.CallSub("ExplodeBOM", "Parent", V.Local.sMultiPartWO(V.Local.iCounter2))
+					F.Intrinsic.Control.Else
+						F.Intrinsic.Control.CallSub("ExplodeBOMMulti", "Parent", V.Local.sMultiPartWO(V.Local.iCounter2))
+						F.Data.DataTable.Merge("dtBOMTemp", "dtBOM", True, 2)
+						F.Data.DataTable.Close("dtBOMTemp")
+					F.Intrinsic.Control.EndIf
+					
+				F.Intrinsic.Control.Next(V.Local.iCounter2)
+				
+				'Adding expression column to get trimmed part numbers
+				F.Data.DataTable.AddExpressionColumn("dtBOM", "PART_TRIMMED", "String", "TRIM(PART)")
+				
+				'Dictionary to get MultiPart QTY for each multipart parent and adding matched values to MULTI_QTY column.
+				F.Intrinsic.String.Build("select RTRIM(PART) PART, QTY from V_JOB_MULT_PARTS where JOB = '{0}' and SUFFIX = '{1}';", V.DataTable.dtWOs(V.Local.iCounter).JOB!FieldValTrim, V.DataTable.dtWOs(V.Local.iCounter).SUFFIX!FieldValTrim, V.Local.sSQL)
+				F.Data.Dictionary.CreateFromSQL("dictMulti", "Con", V.Local.sSQL)
+				F.Data.Dictionary.SetDefaultReturn("dictMulti", 1)
+				F.Data.DataTable.AddColumn("dtBOM", "MULTI_QTY", "Float")
+				F.Data.DataTable.FillFromDictionary("dtBOM", "dictMulti", "PART_TRIMMED", "MULTI_QTY")
+				F.Data.Dictionary.Close("dictMulti")
+				
+			f.Intrinsic.Control.Else
+			
+				'Getting associated BOM for the WO's part.
+				F.Intrinsic.Control.CallSub("ExplodeBOM", "Parent", V.DataTable.dtWOs(V.Local.iCounter).PART!FieldValTrim)
+				
+				'Adding expression column to get trimmed part numbers
+				F.Data.DataTable.AddExpressionColumn("dtBOM", "PART_TRIMMED", "String", "TRIM(PART)")
+				
+				'Adding column but setting all records to 1 since their WO is not a multipart.
+				F.Data.DataTable.AddColumn("dtBOM", "MULTI_QTY", "Float", 1)
+				
+			F.Intrinsic.Control.EndIf
+			
+			'Dictionary to get MEMO1 field at line level.
+			F.Data.Dictionary.CreateFromSQL("dictMemo1", "Con", "select RTRIM(PART) PART, RTRIM(MEMO_1) MEMO_1 from V_BOM_ENG;")
+			F.Data.Dictionary.SetDefaultReturn("dictMemo1", "")
+			F.Data.DataTable.AddColumn("dtBOM", "MEMO_1", "String")
+			F.Data.DataTable.FillFromDictionary("dtBOM", "dictMemo1", "PART_TRIMMED", "MEMO_1")
+			F.Data.Dictionary.Close("dictMemo1")
+			
+			'Dictionary to get PL field at line level.
+			F.Data.Dictionary.CreateFromSQL("dictPL", "Con", "select RTRIM(PART) PART, RTRIM(PRODUCT_LINE) PRODUCT_LINE from V_INVENTORY_MSTR;")
+			F.Data.Dictionary.SetDefaultReturn("dictPL", "")
+			F.Data.DataTable.AddColumn("dtBOM", "PRODUCT_LINE", "String")
+			F.Data.DataTable.FillFromDictionary("dtBOM", "dictPL", "PART_TRIMMED", "PRODUCT_LINE")
+			F.Data.Dictionary.Close("dictPL")
+			
+			'Excluding any BOM parts where their MEMO1 field contains the word SUB or the word PARENT. More constraints were added to filter the dv to only have records whose PL = BA or BE or MS.
+			F.Data.DataView.Create("dtBOM", "dvBOM", 22,"[MEMO_1] <> 'SUB' and [MEMO_1] <> 'PARENT' and ([PRODUCT_LINE] ='BE' or [PRODUCT_LINE] ='BA' or [PRODUCT_LINE] ='MS')", "")
+
+			'BOM_MSTR.PART = IDBAC_GSS.BARCODE
+			F.Data.Linq.Join("LeftJoin","DataView","dtBOM","dvBOM*!*OPER1","DataTable","dtIDBAC_GSS*!*OPER2","OPER1.PART = OPER2.BARCODE","*","","","","dtWO_BOM",True)
+			
+			'Adding columns to be used to identify records that fall into one of the error handling scenarios
+			F.Data.DataTable.AddColumn("dtWO_BOM", "ERROR_1", "Boolean", False)
+			F.Data.DataTable.AddColumn("dtWO_BOM", "ERROR_2", "Boolean", False)
+			F.Data.DataTable.AddColumn("dtWO_BOM", "ERROR_3", "Boolean", False)
+			
+			'Error handling 1: Identify any BOM part whose FILENAME_1 field is blank
+			F.Data.DataView.Create("dtWO_BOM", "dvWO_BOM", 22,"[FILENAME_1] = ''", "")
+			f.Data.DataView.SetValue("dtWO_BOM", "dvWO_BOM", -1, "ERROR_1", True)
+			F.Data.DataView.Close("dtWO_BOM", "dvWO_BOM")
+			
+			'Error handling 2: Identify any BOM part that doesn't exist in custom table IDBAC_GSS
+			F.Data.DataView.Create("dtWO_BOM", "dvWO_BOM", 22,"isnull([BARCODE], '') = ''", "")
+			f.Data.DataView.SetValue("dtWO_BOM", "dvWO_BOM", -1, "ERROR_2", True)
+			F.Data.DataView.Close("dtWO_BOM", "dvWO_BOM")
+			
+			'Error handling 3: Identify any BOM part whose MATERIAL field is blank
+			F.Data.DataView.Create("dtWO_BOM", "dvWO_BOM", 22,"[MATERIAL] = ''", "")
+			f.Data.DataView.SetValue("dtWO_BOM", "dvWO_BOM", -1, "ERROR_3", True)
+			F.Data.DataView.Close("dtWO_BOM", "dvWO_BOM")
+			
+			'Creating final dt in which all its records should be exported to the CSV
+			F.Data.DataView.Create("dtWO_BOM", "dvWO_BOM", 22,"[ERROR_1] = 'False' and [ERROR_2] = 'False' and [ERROR_3] = 'False'", "")
+			f.Data.DataView.ToDataTable("dtWO_BOM", "dvWO_BOM", "dtExport", True)
+			F.Data.DataView.Close("dtWO_BOM", "dvWO_BOM")
+			
+			'Creating dv for all BOM parts that fell into one of the error handling scenarios
+			F.Data.DataView.Create("dtWO_BOM", "dvWO_BOM", 22,"[ERROR_1] = 'True' or [ERROR_2] = 'True' or [ERROR_3] = 'True'", "")
+			
+			F.Intrinsic.Control.If(V.DataView.dtWO_BOM!dvWO_BOM.RowCount, >, 0)
+				
+				F.Intrinsic.Control.If(V.DataTable.dtError.Exists, =, False)
+					
+					'Creating dtError to store all error records
+					f.Data.DataView.ToDataTable("dtWO_BOM", "dvWO_BOM", "dtError", True)
+				
+				F.Intrinsic.Control.Else
+					
+					'If dtError exists, in means a previous loop created it. So now we just want to add more records to it. These new records would be from a different processed WO.
+					f.Data.DataView.ToDataTable("dtWO_BOM", "dvWO_BOM", "dtErrorAdd", True)
+					F.Data.DataTable.Merge("dtErrorAdd", "dtError", True, 2)
+					F.Data.DataTable.Close("dtErrorAdd")
+				
+				F.Intrinsic.Control.EndIf
+			
+			F.Intrinsic.Control.EndIf
+			
+			'Calling sub to create the single comma delimeted string for each BOM record
+			F.Intrinsic.Control.CallSub("CSV_String", "WOCounter", V.Local.iCounter)
+			
+			'Building FS variable and calling sub to write to CSV file
+			f.Intrinsic.String.Build("{0}_{1}",V.Local.sSelectedFS(0), V.Local.sSelectedFS(1), v.Local.sFS)
+			F.Intrinsic.Control.CallSub("WritingtoCSV", "Contents", V.Args.Contents, "FS", v.Local.sFS, "MainCounter", V.Local.iCounter)
+		
+			'Closing dts and dv
+			F.Data.DataView.Close("dtBOM", "dvBOM")
+			F.Data.DataTable.Close("dtBOM")
+			F.Data.DataView.Close("dtWO_BOM", "dvWO_BOM")
+			F.Data.DataTable.Close("dtWO_BOM")
+			F.Data.DataTable.Close("dtExport")
+			
+		F.Intrinsic.Control.Next(V.Local.iCounter)
+		
+		'Program has looped through all WOs at this point.
+		F.Intrinsic.UI.CloseWaitDialog
+		
+		'Once all the looping and exporting process has been completed, the program will validate if dtError exits since it would mean there are error records.
+		F.Intrinsic.Control.If(V.DataTable.dtError.Exists, =, True)
+		
+			'If it does, creating dv from dtError to store all BOM parts in a unique vairable for each one of the error handling scenarios.
+			'Displaying messagbox for error handling scenario 1
+			F.Data.DataView.Create("dtError", "dvError", 22,"[ERROR_1] = 'True'", "")
+			F.Intrinsic.Control.If(V.DataView.dtError!dvError.RowCount, >, 0)
+			
+				F.Data.DataView.ToString("dtError", "dvError", "PART_TRIMMED", "", "*!*", V.Local.sEH1)
+				F.Intrinsic.String.Replace(V.Local.sEH1, "*!*", ", ", V.Local.sEH1)
+				f.Intrinsic.String.Build("The following parts have no Nesting DXF file. Make sure that ‘Generate CNC Data’ has been run in Imos:{0}{1}", V.Ambient.NewLine, V.Local.sEH1, v.Local.sEH1)
+				F.Intrinsic.UI.Msgbox(V.Local.sEH1, "GCG 6792 - AlphaCAM Flex Schedule Export")
+			
+			F.Intrinsic.Control.EndIf
+			F.Data.DataView.Close("dtError", "dvError")
+			
+			'Displaying messagbox for error handling scenario 2
+			F.Data.DataView.Create("dtError", "dvError", 22,"[ERROR_2] = 'True'", "")
+			F.Intrinsic.Control.If(V.DataView.dtError!dvError.RowCount, >, 0)
+			
+				F.Data.DataView.ToString("dtError", "dvError", "PART_TRIMMED", "", "*!*", V.Local.sEH2)
+				F.Intrinsic.String.Replace(V.Local.sEH2, "*!*", ", ", V.Local.sEH2)
+				f.Intrinsic.String.Build("The following parts don’t exist in the IDBAC_GSS table. Make sure that the BOM in GSS is the latest version and that ‘Process Data Transfer’ has been run in Imos:{0}{1}", V.Ambient.NewLine, V.Local.sEH2, v.Local.sEH2)
+				F.Intrinsic.UI.Msgbox(V.Local.sEH2, "GCG 6792 - AlphaCAM Flex Schedule Export")
+			
+			F.Intrinsic.Control.EndIf
+			F.Data.DataView.Close("dtError", "dvError")
+			
+			'Displaying messagbox for error handling scenario 3
+			F.Data.DataView.Create("dtError", "dvError", 22,"[ERROR_3] = 'True'", "")
+			F.Intrinsic.Control.If(V.DataView.dtError!dvError.RowCount, >, 0)
+			
+				F.Data.DataView.ToString("dtError", "dvError", "PART_TRIMMED", "", "*!*", V.Local.sEH3)
+				F.Intrinsic.String.Replace(V.Local.sEH3, "*!*", ", ", V.Local.sEH3)
+				f.Intrinsic.String.Build("The following parts do not have a core material and are not identified as a sub assembly in the BOM:{0}{1}", V.Ambient.NewLine, V.Local.sEH3, v.Local.sEH3)
+				F.Intrinsic.UI.Msgbox(V.Local.sEH3, "GCG 6792 - AlphaCAM Flex Schedule Export")
+			
+			F.Intrinsic.Control.EndIf
+			F.Data.DataView.Close("dtError", "dvError")
+		
+		F.Intrinsic.Control.Else
+		
+			'If it doesn't, the customer specifically asked to display another msgbox to let the user know everything was okey
+			F.Intrinsic.UI.Msgbox("Process executed successfully.", "GCG 6792 - AlphaCAM Flex Schedule Export")
+		
+		F.Intrinsic.Control.EndIf
+		
+	F.Intrinsic.Control.Else
+		
+		'If a FS wasnt selected from the browser (CANCEL)
+		F.Intrinsic.UI.Msgbox("A flex schedule must be selected to proceed, ending program.", "Error")
+		F.Intrinsic.Control.CallSub("Unload")
+		
+	F.Intrinsic.Control.EndIf
+	F.ODBC.Connection!Con.Close
+
+F.Intrinsic.Control.Catch
+	
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.Main.End
+
+Program.Sub.CSV_String.Start
+'This subroutine creates a single comma delimited string for each BOM part in dtExport. 
+'V.Args.WOCounter
+F.Intrinsic.Control.Try
+
+	V.Local.iCounter.Declare(Long)
+	V.Local.sContents.Declare(String)
+	V.Local.sFile.Declare(String)
+	
+	V.Local.sCLength.Declare(String)
+	V.Local.sCWidth.Declare(String)
+	V.Local.sCTHK.Declare(String)
+	V.Local.sNestRotation.Declare(String)
+	V.Local.sNestPart.Declare(String)
+	V.Local.sFLength.Declare(String)
+	V.Local.sFWidth.Declare(String)
+	V.Local.sWeight.Declare(String)
+	
+	V.Local.sPartNumber.Declare(String)
+	V.Local.sNestImage.Declare(String)
+	V.Local.sWO.Declare(String)
+	V.Local.sUFs.Declare(String)
+	
+	V.Local.fJobQty.Declare(Float)
+	V.Local.fBOMQty.Declare(Float)
+	V.Local.fQty.Declare(Float)
+	V.Local.fMultiPartQty.Declare(Float)
+	
+	'Looping through all record from final dt
+	F.Intrinsic.Control.For(V.Local.iCounter, 0, V.DataTable.dtExport.RowCount--, 1) 
+	
+		'Setting variables for parameters that are not strings just to keep track of them
+		V.Local.sCLength.Set(V.DataTable.dtExport(V.Local.iCounter).CLENG!FieldValLong)
+		V.Local.sCWidth.Set(V.DataTable.dtExport(V.Local.iCounter).CWIDTH!FieldValLong)
+		V.Local.sCTHK.Set(V.DataTable.dtExport(V.Local.iCounter).CTHK!FieldValLong)
+		V.Local.sNestRotation.Set(V.DataTable.dtExport(V.Local.iCounter).NEST_ROTATION_ANGLE!FieldValLong)
+		V.Local.sNestPart.Set(V.DataTable.dtExport(V.Local.iCounter).NEST_PART!FieldValLong)
+		V.Local.sFLength.Set(V.DataTable.dtExport(V.Local.iCounter).FLENG!FieldValLong)
+		V.Local.sFWidth.Set(V.DataTable.dtExport(V.Local.iCounter).FWIDTH!FieldValLong)
+		V.Local.sWeight.Set(V.DataTable.dtExport(V.Local.iCounter).WEIGHT!FieldValLong)
+		
+		'Building Quantity parameter
+		V.Local.fJobQty.Set(V.DataTable.dtWOs(V.Args.WOCounter).QTY_ORDER!FieldVal)
+		V.Local.fBOMQty.Set(V.DataTable.dtExport(V.Local.iCounter).QUANTITY!FieldVal)
+		V.Local.fMultiPartQty.Set(V.DataTable.dtExport(V.Local.iCounter).MULTI_QTY!FieldVal)
+		F.Intrinsic.Math.Mult(V.Local.fJobQty, V.Local.fBOMQty, V.Local.fMultiPartQty, V.Local.fQty)
+		
+		'Building special parameters
+		f.Intrinsic.String.Build("{0}_{1}",V.DataTable.dtExport(V.Local.iCounter).PARTNAME!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).BARCODE!FieldValTrim, v.Local.sPartNumber)
+		f.Intrinsic.String.Build("\\smb19dc02\General\__Imos PNGs\{0}\{1}_01.png",V.DataTable.dtExport(V.Local.iCounter).ORDERID!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).BARCODE!FieldValTrim, v.Local.sNestImage)
+		f.Intrinsic.String.Build("{0}_{1}",V.DataTable.dtWOs(V.Args.WOCounter).JOB!FieldValTrim, V.DataTable.dtWOs(V.Args.WOCounter).SUFFIX!FieldValTrim, v.Local.sWO)
+		f.Intrinsic.String.Build("{0}_{1}_{2}_{3}_{4}",V.DataTable.dtWOs(V.Args.WOCounter).USER_1!FieldValTrim, V.DataTable.dtWOs(V.Args.WOCounter).USER_2!FieldValTrim, V.DataTable.dtWOs(V.Args.WOCounter).USER_3!FieldValTrim, V.DataTable.dtWOs(V.Args.WOCounter).USER_4!FieldValTrim, V.DataTable.dtWOs(V.Args.WOCounter).USER_5!FieldValTrim, v.Local.sUFs)
+		
+		F.Intrinsic.Control.If(V.Local.iCounter, =, 0)
+		
+			'Building single comma delimited string
+			f.Intrinsic.String.Build("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20},{21},{22},{23},{24},{25},{26},{27}", V.DataTable.dtExport(V.Local.iCounter).FILENAME_1!FieldValTrim, v.Local.sPartNumber, V.Local.fQty.Long, V.DataTable.dtExport(V.Local.iCounter).MATERIAL!FieldValTrim, V.Local.sCLength,V.Local.sCWidth,V.Local.sCTHK,V.Local.sNestRotation,V.Local.sNestPart, V.DataTable.dtExport(V.Local.iCounter).EDGING!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).INFO1!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).INFO2!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).INFO3!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).PH3_PROG_NO!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).PARENT!FieldValTrim, V.Local.sFLength,V.Local.sFWidth, V.DataTable.dtExport(V.Local.iCounter).PH2_PROG_NO!FieldValTrim,v.Local.sNestImage, V.DataTable.dtExport(V.Local.iCounter).SHORT_TEXT!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).SURF_TOP!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).SURF_BOT!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).MAT_NOTES!FieldValTrim, V.Local.sWeight, V.DataTable.dtExport(V.Local.iCounter).ART_NO!FieldValTrim, v.Local.sWO, V.DataTable.dtExport(V.Local.iCounter).ROUTER!FieldValTrim, v.Local.sUFs, v.Local.sContents)	
+		
+		F.Intrinsic.Control.Else
+		
+			'Building single comma delimited string
+			f.Intrinsic.String.Build("{0}{1}{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20},{21},{22},{23},{24},{25},{26},{27},{28},{29}", v.Local.sContents, V.Ambient.NewLine, V.DataTable.dtExport(V.Local.iCounter).FILENAME_1!FieldValTrim, v.Local.sPartNumber, V.Local.fQty.Long, V.DataTable.dtExport(V.Local.iCounter).MATERIAL!FieldValTrim, V.Local.sCLength,V.Local.sCWidth,V.Local.sCTHK,V.Local.sNestRotation,V.Local.sNestPart, V.DataTable.dtExport(V.Local.iCounter).EDGING!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).INFO1!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).INFO2!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).INFO3!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).PH3_PROG_NO!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).PARENT!FieldValTrim, V.Local.sFLength,V.Local.sFWidth, V.DataTable.dtExport(V.Local.iCounter).PH2_PROG_NO!FieldValTrim,v.Local.sNestImage, V.DataTable.dtExport(V.Local.iCounter).SHORT_TEXT!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).SURF_TOP!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).SURF_BOT!FieldValTrim, V.DataTable.dtExport(V.Local.iCounter).MAT_NOTES!FieldValTrim, V.Local.sWeight, V.DataTable.dtExport(V.Local.iCounter).ART_NO!FieldValTrim, v.Local.sWO, V.DataTable.dtExport(V.Local.iCounter).ROUTER!FieldValTrim, v.Local.sUFs, v.Local.sContents)	
+		
+		F.Intrinsic.Control.EndIf
+		
+	F.Intrinsic.Control.Next(V.Local.iCounter)
+	
+	'Adding return variable for the contents to be written to the CSV file
+	F.Intrinsic.Variable.AddRV("Contents",v.Local.sContents)
+
+F.Intrinsic.Control.Catch
+	
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.CSV_String.End
+
+Program.Sub.CatchError.Start
+'To display the error
+F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}", V.Ambient.ScriptPath, V.Ambient.Newline, V.Ambient.SubroutineCalledFrom, V.Ambient.ErrorNumber, V.Ambient.ErrorDescription, V.Ambient.GABVersion, V.Global.sError) 
+F.Intrinsic.UI.Msgbox(V.Global.sError)
+F.Intrinsic.Control.CallSub("Unload")
+Program.Sub.CatchError.End
+
+Program.Sub.Unload.Start
+'Closes the connection if it is open
+f.Intrinsic.Control.If(v.ODBC.con.exists,=,"1") 	
+    f.ODBC.Connection!Con.Close
+f.Intrinsic.Control.EndIf
+
+'Ending program
+F.Intrinsic.Control.End
+Program.Sub.Unload.End
+
+Program.Sub.WritingtoCSV.Start
+'This subroutine writes the processed records to the CSV file
+'V.Args.Contents, V.Args.FS, V.Args.MainCounter
+F.Intrinsic.Control.Try
+
+	V.Local.sFile.Declare(String)
+	V.Local.bExists.Declare(Boolean)
+	V.Local.sContents.Declare(String)
+	V.Local.sFlexSchedule.Declare(String)
+	
+	V.Local.sContents.Set(V.Args.Contents)
+	V.Local.sFlexSchedule.Set(V.Args.FS)
+	
+	'Checking if csv file exists already.
+	F.Intrinsic.String.Build("{0}\{1}.csv", V.Global.sExportPath, V.Local.sFlexSchedule, V.Local.sFile)
+	F.Intrinsic.File.Exists(V.Local.sFile, V.Local.bExists)
+	
+	F.Intrinsic.Control.If(V.Local.bExists.Not)
+		
+		'Creating file since it doesn't exist.
+		F.Intrinsic.File.String2File(V.Local.sFile, V.Local.sContents)
+		
+	F.Intrinsic.Control.Else
+		
+		F.Intrinsic.Control.If(V.Args.MainCounter, =, 0)
+			
+			'If program gets here, it means that the file already exists and the user is rerunning the process for a FS whose file already exists. 
+			'Deleting file and creating it again to avoid getting duplicate records when running the process for the same FS multiple times.
+			F.Intrinsic.File.DeleteFile(V.Local.sFile)
+			F.Intrinsic.File.String2File(V.Local.sFile, V.Local.sContents)
+			
+		F.Intrinsic.Control.Else
+		
+			'Adding records to existing file.
+			F.Intrinsic.File.Append2FileNewLine(V.Local.sFile, V.Local.sContents)
+	
+		F.Intrinsic.Control.EndIf
+		
+	F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Catch
+	
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.WritingtoCSV.End
+
+Program.Sub.GetExportPath.Start
+'This subroutine validates if there is already an export path set. Ends program if there isn't.
+F.Intrinsic.Control.Try
+
+	V.Local.sSQL.Declare(String)
+	
+	'\\smb19dc02\General\__AlphaCAM Import CSV Files\ --> Path that the customer wants to set up
+	F.ODBC.Connection!Con.OpenCompanyConnection
+	F.ODBC.Connection!Con.ExecuteAndReturn("select RTRIM(EXPORTDIR) EXPORTDIR from GCG_6792_MM;", V.Local.sSQL)
+	
+	F.Intrinsic.Control.If(V.Ambient.ExecuteAndReturnEOF, =, False)
+		V.Global.sExportPath.Set(V.Local.sSQL)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.UI.Msgbox("There is no export path set up in this project's maintenance menu, ending program.", "Error")
+		F.Intrinsic.Control.CallSub("Unload")
+	F.Intrinsic.Control.EndIf
+	F.ODBC.Connection!Con.Close
+
+F.Intrinsic.Control.Catch
+	
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.GetExportPath.End
+
+Program.Sub.ExplodeBOM.Start
+'Taking this sub directly from ARC 5875 to get all the exploded BOM
+
+F.Intrinsic.Control.Try
+
+	V.Local.sFieldNames.Declare 
+	V.Local.sTypes.Declare 
+	V.Local.sFilePath.Declare 
+	V.Local.sParams.Declare 
+	V.Local.bExists.Declare 
+	V.Local.sRet.Declare 
+	V.Local.sFile.Declare 
+	v.Local.ifor.Declare 
+	V.Local.sRet1.Declare 
+	
+	V.Local.sFieldNames.Set("Line*!*Seq*!*PartNumber*!*Description*!*Cat*!*Source*!*QUANTITY*!*OnHand*!*OnOrder*!*Required*!*Net*!*RtrNet*!*Parent*!*ldHrs*!*LdDate*!*PART*!*UM*!*GSS_EXTRA_DESC*!*ParentFLAG")
+	V.Local.sTypes.Set("String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String")
+	
+	F.Intrinsic.String.Build("{0}\BOM{1}",V.System.Temp,V.Caller.Terminal,V.Local.sFilePath)
+	F.Intrinsic.String.Build("0{0}{1}{0}{2}",V.Ambient.Tab,V.Args.Parent,v.Local.sFilePath,V.Local.sParams)
+	F.Intrinsic.File.String2File(V.Local.sFilePath,V.Local.sParams)
+	F.Global.General.CallWrapperSync(410000,V.Local.sFilePath)
+	'Getting 'Missing Location: You must select location' error message during callwrapper's execution. If customer doesn't use location, will the error msg get displayed?
+	
+	F.Intrinsic.File.Exists(V.Local.sFilePath,V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists,=,False)
+		F.Intrinsic.Control.ExitSub
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.File.FiletoStringArray(V.Local.sFilePath,V.Ambient.Tab,V.Local.sRet)
+	V.Local.sRet.RedimPreserve(0,3)
+	F.Intrinsic.File.GetFileNameFromFQN(V.Local.sRet(3),V.Local.sFile.Trim)
+	F.Intrinsic.String.Split(V.Local.sFile," ",V.Local.sFile)
+	F.Intrinsic.String.Build("{0}\{1}",V.System.Temp,V.Local.sFile(0).Trim,V.Local.sFilePath)
+	F.Intrinsic.File.Exists(V.Local.sFilePath,V.Local.bExists)
+	
+	F.Intrinsic.Control.If(V.Local.bExists,=,False)
+		F.Intrinsic.Control.ExitSub
+	F.Intrinsic.Control.EndIf
+	
+	'load it to a string
+	F.Intrinsic.File.File2String(V.Local.sFilePath,V.Local.sRet)
+	
+	F.Data.DataTable.CreateFromString("dtExplodeBOM",V.Local.sret,V.Local.sFieldNames,V.Local.sTypes,"|~|",v.ambient.newline,True)
+	
+	'Deleting not required rows in dt
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 6)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 5)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 4)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 3)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 2)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 1)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 0)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", v.DataTable.dtExplodeBOM.RowCount--)
+	
+	'Creating dv to get rid of all purchased parts
+	F.Data.DataView.Create("dtExplodeBOM", "dtExplodeBOM", 22,"[SOURCE] <> 'PJ' and [SOURCE] <> 'PS'", "")	
+	f.Data.DataView.ToDataTable("dtExplodeBOM", "dtExplodeBOM", "dtBOM", True)
+	F.Data.DataView.Close("dtExplodeBOM", "dtExplodeBOM")	
+	F.Data.DataTable.Close("dtExplodeBOM")
+
+F.Intrinsic.Control.Catch
+	
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.ExplodeBOM.End
+
+Program.Sub.ExplodeBOMMulti.Start
+'Taking this sub directly from ARC 5875 to get all the exploded BOM
+
+F.Intrinsic.Control.Try
+
+	V.Local.sFieldNames.Declare 
+	V.Local.sTypes.Declare 
+	V.Local.sFilePath.Declare 
+	V.Local.sParams.Declare 
+	V.Local.bExists.Declare 
+	V.Local.sRet.Declare 
+	V.Local.sFile.Declare 
+	v.Local.ifor.Declare 
+	V.Local.sRet1.Declare 
+	
+	V.Local.sFieldNames.Set("Line*!*Seq*!*PartNumber*!*Description*!*Cat*!*Source*!*QUANTITY*!*OnHand*!*OnOrder*!*Required*!*Net*!*RtrNet*!*Parent*!*ldHrs*!*LdDate*!*PART*!*UM*!*GSS_EXTRA_DESC*!*ParentFLAG")
+	V.Local.sTypes.Set("String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String*!*String")
+	
+	F.Intrinsic.String.Build("{0}\BOM{1}",V.System.Temp,V.Caller.Terminal,V.Local.sFilePath)
+	F.Intrinsic.String.Build("0{0}{1}{0}{2}",V.Ambient.Tab,V.Args.Parent,v.Local.sFilePath,V.Local.sParams)
+	F.Intrinsic.File.String2File(V.Local.sFilePath,V.Local.sParams)
+	F.Global.General.CallWrapperSync(410000,V.Local.sFilePath)
+	'Getting 'Missing Location: You must select location' error message during callwrapper's execution. If customer doesn't use location, will the error msg get displayed?
+	
+	F.Intrinsic.File.Exists(V.Local.sFilePath,V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists,=,False)
+		F.Intrinsic.Control.ExitSub
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.File.FiletoStringArray(V.Local.sFilePath,V.Ambient.Tab,V.Local.sRet)
+	V.Local.sRet.RedimPreserve(0,3)
+	F.Intrinsic.File.GetFileNameFromFQN(V.Local.sRet(3),V.Local.sFile.Trim)
+	F.Intrinsic.String.Split(V.Local.sFile," ",V.Local.sFile)
+	F.Intrinsic.String.Build("{0}\{1}",V.System.Temp,V.Local.sFile(0).Trim,V.Local.sFilePath)
+	F.Intrinsic.File.Exists(V.Local.sFilePath,V.Local.bExists)
+	
+	F.Intrinsic.Control.If(V.Local.bExists,=,False)
+		F.Intrinsic.Control.ExitSub
+	F.Intrinsic.Control.EndIf
+	
+	'load it to a string
+	F.Intrinsic.File.File2String(V.Local.sFilePath,V.Local.sRet)
+	
+	F.Data.DataTable.CreateFromString("dtExplodeBOM",V.Local.sret,V.Local.sFieldNames,V.Local.sTypes,"|~|",v.ambient.newline,True)
+	
+	'Deleting not required rows in dt
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 6)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 5)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 4)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 3)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 2)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 1)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", 0)
+	Function.Data.DataTable.DeleteRow("dtExplodeBOM", v.DataTable.dtExplodeBOM.RowCount--)
+	
+	'Creating dv to get rid of all purchased parts
+	F.Data.DataView.Create("dtExplodeBOM", "dtExplodeBOM", 22,"[SOURCE] <> 'PJ' and [SOURCE] <> 'PS'", "")	
+	f.Data.DataView.ToDataTable("dtExplodeBOM", "dtExplodeBOM", "dtBOMTemp", True)
+	F.Data.DataView.Close("dtExplodeBOM", "dtExplodeBOM")	
+	F.Data.DataTable.Close("dtExplodeBOM")
+
+F.Intrinsic.Control.Catch
+	
+	F.Intrinsic.Control.CallSub(CatchError)
+	
+F.Intrinsic.Control.EndTry
+Program.Sub.ExplodeBOMMulti.End
+
+Program.Sub.Comments.Start
+${$5$}$20.1.8223.27623$}$1
+${$6$}$apadilla$}$20220720130720023$}$Lag9STqBJOmNXSbd5+msRcBWPGz0aFqSzPePUG9qWbwiJ90AlOy/xZgSfprGN1hpOEwG8kEidOJ9pz/an6W7sA==
+Program.Sub.Comments.End
